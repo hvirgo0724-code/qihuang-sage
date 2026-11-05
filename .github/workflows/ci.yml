@@ -1,30 +1,65 @@
-name: ci
+name: 岐黄智诊 CI
 
 on:
   push:
+    branches: [main, master]
   pull_request:
+    branches: [main, master]
 
 jobs:
-  backend-test:
+  backend:
+    name: 后端测试
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.11
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
-      - name: Install dependencies
+      - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
 
-      - name: Import check
+      - name: 模块导入检查
         working-directory: backend
         run: |
-          python -c "import langchain, langchain_core, langchain_openai, langgraph, langsmith; print('langchain-imports-ok')"
-          python -c "from app.core import graph; from app.core.agents import AgentRuntime, AGENT_TOOLS; from app.services import syndrome_service; from app.api import clinical; print('app-imports-ok')"
+          python -c "import langchain, langchain_core, langgraph, langsmith; print('OK langchain-imports')"
+          python -c "from app.core import graph, llm, config; from app.services import ner, prompt_service; print('OK app-imports')"
 
-      - name: Offline unit tests
+      - name: 离线单元测试
         working-directory: backend
         run: python -m unittest discover -s tests -v
+
+  frontend:
+    name: 前端构建检查
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: TypeScript 类型检查
+        working-directory: frontend
+        run: npx vue-tsc --noEmit
+
+      - name: 构建产物检查
+        working-directory: frontend
+        run: npm run build
