@@ -1,0 +1,51 @@
+groups:
+  - name: tcm-app
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(tcm_requests_total{status=~"5.."}[5m]))
+          / clamp_min(sum(rate(tcm_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "后端错误率超过 5%"
+          description: "{{ $value | humanizePercentage }}"
+
+      - alert: HighP99Latency
+        expr: histogram_quantile(0.99, sum by (le) (rate(tcm_request_latency_seconds_bucket[5m]))) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P99 延迟超过 2s"
+
+      - alert: SafetyBlockAnomaly
+        expr: increase(tcm_safety_checks_total{result="emergency"}[10m]) > 0
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "检测到急危重症输入，请关注会话"
+
+      - alert: LLMErrorSpike
+        expr: increase(tcm_llm_calls_total{outcome="error"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM 调用错误激增"
+      - alert: ConsultationStreamFailure
+        expr: sum(increase(tcm_consultation_failures_total[5m])) > 3
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SSE 问诊业务失败增加（HTTP 200 也可能发生）"
+      - alert: BackendUnavailable
+        expr: up{job="tcm-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "后端指标抓取失败"

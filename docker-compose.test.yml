@@ -1,0 +1,31 @@
+name: qihuang-sage-test
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test-only
+      POSTGRES_DB: test_memory
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d test_memory"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  tests:
+    image: tcm/backend:enterprise-test
+    volumes:
+      - ./backend:/app:ro
+    environment:
+      POSTGRES_HOST: postgres-test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test-only
+      POSTGRES_DB: test_memory
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      LANGSMITH_TRACING: "false"
+      RUN_POSTGRES_TESTS: "1"
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]

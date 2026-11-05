@@ -1,0 +1,50 @@
+# ---- Environment ----
+.env
+.env.local
+.env.*.local
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/uploads/
+backend/logs/
+backend/asyncjobs/
+
+# ---- Frontend ----
+node_modules/
+dist/
+frontend/dist/
+frontend/.vite/
+frontend/.nuxt/
+frontend/.output/
+
+# ---- Docker ----
+docker-compose.override.yml
+data/
+volumes/
+
+# ---- IDE / Editor ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Trae / AI temp ----
+.screenshots/
+
+# ---- Sensitive uploads ----
+init/*.dmp

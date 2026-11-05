@@ -1,0 +1,5 @@
+# Offline fallback: run npm run build locally first.
+# docker build -f frontend/Dockerfile.prebuilt -t tcm/frontend:latest frontend
+FROM tcm/frontend:latest
+COPY dist/ /usr/share/nginx/html/
+COPY nginx.conf /etc/nginx/conf.d/default.conf

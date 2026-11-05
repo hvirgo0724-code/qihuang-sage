@@ -1,0 +1,395 @@
+name: tcm-qihuang-sage
+
+# 岐黄智诊 中医智能诊疗协同平台 编排文件 (Compose v2, 无 version 字段)
+# 一键启动: cp .env.example .env && docker compose up -d --build
+# API 单进程保证指标一致；多副本需网关、服务发现及独立抓取配置。worker 可 --scale worker=3。
+
+networks:
+  tcm-net:
+    driver: bridge
+
+volumes:
+  mysql-data:
+  redis-data:
+  neo4j-data:
+  neo4j-logs:
+  pg-data:
+  etcd-data:
+  s3-data:
+  milvus-data:
+  grafana-data:
+  prometheus-data:
+  uploads-data:
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: tcm-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-tcm-root-password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tcm}
+      MYSQL_USER: ${MYSQL_USER:-tcm}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-tcm-password}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:3306:3306"
+    networks: [tcm-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: tcm-redis
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks: [tcm-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: tcm-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tcm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tcm-pg-password}
+      POSTGRES_DB: ${POSTGRES_DB:-tcm_memory}
+      TZ: Asia/Shanghai
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks: [tcm-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tcm} -d ${POSTGRES_DB:-tcm_memory}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: tcm-neo4j
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-tcm-neo4j-password}
+      NEO4J_server_memory_pagecache_size: 512M
+      NEO4J_server_memory_heap_max__size: 512M
+      NEO4J_PLUGINS: "[\"apoc\"]"
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    networks: [tcm-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    container_name: tcm-etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    command:
+      - etcd
+      - -advertise-client-urls=http://etcd:2379
+      - -listen-client-urls=http://0.0.0.0:2379
+      - --data-dir=/etcd
+    volumes:
+      - etcd-data:/etcd
+    ports:
+      - "127.0.0.1:2379:2379"
+    networks: [tcm-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # MinIO 官方镜像/二进制已下架（转为商业 AIStor），改用 S3 协议兼容的 S3Mock 作为
+  # Milvus standalone 的对象存储后端。S3Mock 默认 HTTP 端口为 9090，支持 multipart 上传。
+  s3:
+    image: adobe/s3mock:latest
+    container_name: tcm-s3
+    environment:
+      COM_ADOBE_TESTING_S3MOCK_STORE_ROOT: /s3mockroot
+      COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: a-bucket
+      COM_ADOBE_TESTING_S3MOCK_STORE_RETAIN_FILES_ON_EXIT: "true"
+      COM_ADOBE_TESTING_S3MOCK_STORE_REGION: us-east-1
+    volumes:
+      - s3-data:/s3mockroot
+    networks: [tcm-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/favicon.ico"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+  # 旧版 Milvus 创建的数据可能属于 root；为新版非 root 用户初始化卷权限。
+  milvus-volume-init:
+    image: milvusdb/milvus:v3.0.2
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 999:999 /var/lib/milvus"]
+    volumes:
+      - milvus-data:/var/lib/milvus
+    network_mode: none
+    restart: "no"
+
+  milvus:
+    image: milvusdb/milvus:v3.0.2
+    container_name: tcm-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: s3:9090
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET_NAME: a-bucket
+      COMMON_SECURITY_AUTHORIZATIONENABLED: "false"
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports:
+      - "127.0.0.1:19530:19530"
+      - "127.0.0.1:9091:9091"
+    depends_on:
+      milvus-volume-init:
+        condition: service_completed_successfully
+      etcd:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+    networks: [tcm-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 90s
+
+  memory-migrate:
+    build:
+      context: ./backend
+    image: tcm/backend:latest
+    command: ["python", "-m", "app.scripts.migrate_memory"]
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [tcm-net]
+    restart: "no"
+
+  clinical-migrate:
+    image: tcm/backend:latest
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.scripts.migrate_clinical"]
+    env_file: .env
+    environment:
+      MYSQL_HOST: mysql
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks: [tcm-net]
+    restart: "no"
+
+  memory-beat:
+    image: tcm/backend:latest
+    command: ["celery", "-A", "app.tasks.celery_app", "beat", "--schedule=/tmp/celerybeat-schedule"]
+    env_file: .env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+    depends_on:
+      memory-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [tcm-net]
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    image: tcm/backend:latest
+    volumes:
+      - uploads-data:/app/uploads
+    env_file: .env
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      MYSQL_HOST: mysql
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      NEO4J_URI: bolt://neo4j:7687
+      MILVUS_HOST: milvus
+      POSTGRES_HOST: postgres
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      clinical-migrate:
+        condition: service_completed_successfully
+      memory-migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks: [tcm-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    build:
+      context: ./backend
+    image: tcm/backend:latest
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+    env_file: .env
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      MYSQL_HOST: mysql
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      NEO4J_URI: bolt://neo4j:7687
+      MILVUS_HOST: milvus
+      POSTGRES_HOST: postgres
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    volumes:
+      - ./init:/init:ro
+      - uploads-data:/app/uploads:ro
+    depends_on:
+      memory-migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [tcm-net]
+    restart: unless-stopped
+
+  neo4j-init:
+    build:
+      context: ./backend
+    image: tcm/backend:latest
+    container_name: tcm-neo4j-init
+    command: ["python", "-m", "app.scripts.init_knowledge"]
+    env_file: .env
+    environment:
+      MYSQL_HOST: mysql
+      REDIS_URL: redis://redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      MILVUS_HOST: milvus
+      POSTGRES_HOST: postgres
+    volumes:
+      - ./init:/init:ro
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    networks: [tcm-net]
+    restart: "no"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: /api/v1
+    image: tcm/frontend:latest
+    container_name: tcm-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    networks: [tcm-net]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: tcm-prometheus
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks: [tcm-net]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: tcm-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [tcm-net]
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    container_name: tcm-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    networks: [tcm-net]
+    restart: unless-stopped
